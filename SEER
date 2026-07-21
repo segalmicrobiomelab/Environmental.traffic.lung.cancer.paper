@@ -1,0 +1,887 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+FIGURE 1A
+```{r}
+### Create maps for Traffic PM2.5, Non-Traffic PM2.5, and Lung Cancer Incidence
+library(dplyr)
+library(leaflet)
+
+options(tigris_use_cache = TRUE)
+
+year_to_map <- 2011
+
+seer_year <- readRDS("SEER_PM.rds") %>%
+  filter(year == year_to_map) %>%
+  mutate(county_fips = sprintf("%05s", county_fips))
+
+county_shapes <- tigris::counties(cb = TRUE, class = "sf", year = 2023) %>%
+  sf::st_transform(4326) %>%
+  select(county_fips = GEOID, NAME, STUSPS, geometry)
+
+map_data <- county_shapes %>%
+  left_join(seer_year, by = "county_fips")
+
+traffic_palette <- colorNumeric(
+  "YlGnBu",
+  domain = map_data$Traffic_pre5_mean,
+  na.color = "#e0e0e0"
+)
+
+nontraffic_palette <- colorNumeric(
+  "YlGnBu",
+  domain = map_data$no_traffic_pre5_mean,
+  na.color = "#e0e0e0"
+)
+
+incidence_palette <- colorNumeric(
+  "Reds",
+  domain = map_data$Rate_adj,
+  na.color = "#e0e0e0"
+)
+
+# Construct a legend with the highest interval displayed first
+reverse_legend <- function(values, palette, title, digits) {
+  finite_values <- values[is.finite(values)]
+  
+  if (!length(finite_values)) {
+    return(list(
+      colors = "#e0e0e0",
+      labels = "NA",
+      title = title
+    ))
+  }
+  
+  value_range <- range(finite_values)
+  breaks <- pretty(value_range, n = 6)
+  breaks <- breaks[breaks >= value_range[1] & breaks <= value_range[2]]
+  breaks <- sort(unique(c(value_range, breaks)))
+  
+  if (length(breaks) < 2) {
+    breaks <- value_range
+  }
+  
+  midpoints <- (head(breaks, -1) + tail(breaks, -1)) / 2
+  labels <- paste0(
+    formatC(head(breaks, -1), format = "f", digits = digits),
+    " – ",
+    formatC(tail(breaks, -1), format = "f", digits = digits)
+  )
+  
+  list(
+    colors = rev(palette(midpoints)),
+    labels = rev(labels),
+    title = title
+  )
+}
+
+background_js <- "function(el, x) {
+  var style = document.createElement('style');
+  style.innerHTML = '.leaflet-container { background: #e6f2ff; }';
+  el.appendChild(style);
+}"
+
+make_county_map <- function(
+    data, variable, palette, legend_title, legend_digits,
+    popup_label, popup_digits, popup_suffix = ""
+) {
+  values <- data[[variable]]
+  legend <- reverse_legend(values, palette, legend_title, legend_digits)
+  
+  leaflet(data, options = leafletOptions(zoomSnap = 0.25)) %>%
+    addTiles(
+      urlTemplate = "",
+      attribution = NULL,
+      options = tileOptions(minZoom = 3, maxZoom = 18)
+    ) %>%
+    addPolygons(
+      fillColor = palette(values),
+      fillOpacity = 0.7,
+      weight = 0.3,
+      color = "#444",
+      popup = paste0(
+        data$NAME, ", ", data$STUSPS, "<br>", popup_label,
+        ifelse(is.na(values), "NA", round(values, popup_digits)),
+        popup_suffix
+      )
+    ) %>%
+    addLegend(
+      position = "bottomright",
+      colors = legend$colors,
+      labels = legend$labels,
+      opacity = 0.7,
+      title = legend$title
+    ) %>%
+    fitBounds(lng1 = -125, lat1 = 24, lng2 = -66, lat2 = 49) %>%
+    htmlwidgets::onRender(background_js)
+}
+
+map_traffic <- make_county_map(
+  map_data,
+  variable = "Traffic_pre5_mean",
+  palette = traffic_palette,
+  legend_title = "Traffic PM2.5 (µg m⁻³)",
+  legend_digits = 1,
+  popup_label = "Traffic PM2.5 (µg m⁻³): ",
+  popup_digits = 2
+)
+
+map_nontraffic <- make_county_map(
+  map_data,
+  variable = "no_traffic_pre5_mean",
+  palette = nontraffic_palette,
+  legend_title = "Non-Traffic PM2.5 (µg m⁻³)",
+  legend_digits = 1,
+  popup_label = "Non-Traffic PM2.5 (µg m⁻³): ",
+  popup_digits = 2
+)
+
+map_incidence <- make_county_map(
+  map_data,
+  variable = "Rate_adj",
+  palette = incidence_palette,
+  legend_title = "Cancer incidence (per 100 000)",
+  legend_digits = 0,
+  popup_label = "Incidence: ",
+  popup_digits = 1,
+  popup_suffix = " per 100 000"
+)
+
+map_traffic
+map_nontraffic
+map_incidence
+
+```
+
+FIGURE 1B
+```{r}
+library(dplyr)
+library(ggplot2)
+
+analysis_years <- c(2011, 2015, 2019)
+
+analysis_data <- readRDS("SEER_PM.rds") %>%
+  filter(year %in% analysis_years) %>%
+  mutate(
+    radon_zone = factor(radon_zone),
+    across(
+      c(
+        Air.pollution.ozone.days.raw.value,
+        X..Rural.raw.value,
+        Median.household.income.raw.value
+      ),
+      ~ as.numeric(.x)
+    )
+  )
+
+covariates <- c(
+  "smoke_prev_2011",
+  "radon_zone",
+  "Air.pollution.ozone.days.raw.value",
+  "X..Rural.raw.value",
+  "Median.household.income.raw.value"
+)
+
+# Fit one cross-sectional model and return the exposure estimate with HC3 inference
+estimate_exposure <- function(year_value, exposure_var) {
+  model <- lm(
+    reformulate(c(exposure_var, covariates), response = "Rate_adj"),
+    data = filter(analysis_data, year == year_value)
+  )
+  
+  hc3 <- sandwich::vcovHC(model, type = "HC3")
+  test <- lmtest::coeftest(model, vcov. = hc3)
+  ci <- lmtest::coefci(model, vcov. = hc3)
+  
+  tibble::tibble(
+    year = year_value,
+    exposure = exposure_var,
+    beta = test[exposure_var, "Estimate"],
+    ci_lower = ci[exposure_var, 1],
+    ci_upper = ci[exposure_var, 2],
+    p_value = test[exposure_var, "Pr(>|t|)"]
+  )
+}
+
+adjusted_results <- bind_rows(
+  estimate_exposure(2011, "Traffic_pre5_mean"),
+  estimate_exposure(2015, "Traffic_pre5_mean"),
+  estimate_exposure(2019, "Traffic_pre5_mean"),
+  estimate_exposure(2011, "no_traffic_pre5_mean"),
+  estimate_exposure(2015, "no_traffic_pre5_mean"),
+  estimate_exposure(2019, "no_traffic_pre5_mean")
+)
+
+adjusted_results
+
+# Values displayed in the manuscript figure
+plot_data <- tibble::tribble(
+  ~model,                      ~beta, ~lo,   ~hi,
+  "2011 Traffic pre-5:",        5.32, 3.19,  7.45,
+  "2015 Traffic pre-5:",        4.82, 2.62,  7.02,
+  "2019 Traffic pre-5:",        7.97, 5.12, 10.80,
+  "2011 Non-traffic pre-5:",    2.81, 1.94,  3.67,
+  "2015 Non-traffic pre-5:",    3.52, 2.41,  4.64,
+  "2019 Non-traffic pre-5:",    2.99, 1.66,  4.32
+) %>%
+  mutate(
+    model = factor(model, levels = rev(model)),
+    estimate_label = sprintf("%.2f (%.2f, %.2f)", beta, lo, hi)
+  )
+
+font_size <- 16
+axis_limit <- 1.08 * max(abs(c(plot_data$lo, plot_data$hi)))
+x_breaks <- pretty(c(-axis_limit, axis_limit), n = 6)
+x_estimate <- 1.24 * axis_limit
+
+ggplot(plot_data, aes(x = beta, y = model)) +
+  ggstance::geom_errorbarh(
+    aes(xmin = lo, xmax = hi),
+    height = 0.05,
+    linewidth = 0.3
+  ) +
+  geom_point(size = 2.5) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_text(
+    aes(x = x_estimate, label = estimate_label),
+    hjust = 0,
+    size = font_size / ggplot2::.pt
+  ) +
+  scale_x_continuous(
+    name = "Change in lung cancer incidence per µg/m³",
+    breaks = x_breaks,
+    limits = c(-axis_limit, axis_limit),
+    expand = c(0, 0),
+    oob = scales::oob_keep
+  ) +
+  ylab(NULL) +
+  coord_cartesian(clip = "off") +
+  annotate(
+    "text",
+    x = x_estimate,
+    y = Inf,
+    label = "β (95% CI)",
+    hjust = 0,
+    vjust = 2,
+    fontface = "bold",
+    size = font_size / ggplot2::.pt
+  ) +
+  theme_minimal(base_size = font_size) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(5.5, 200, 5.5, 60, unit = "pt"),
+    axis.text = element_text(size = font_size),
+    axis.title = element_text(size = font_size)
+  )
+```
+
+
+Figure 2A
+```{r}
+seer_fips <- readRDS("SEER_PM.rds")
+
+# Calculate annual population-weighted averages
+joint_trends <- seer_fips %>%
+  dplyr::filter(
+    dplyr::between(year, 2011, 2019),
+    !is.na(Rate_adj),
+    !is.na(Population),
+    Population > 0
+  ) %>%
+  dplyr::group_by(year) %>%
+  dplyr::summarise(
+    lung_rate_per100k = weighted.mean(
+      Rate_adj,
+      Population,
+      na.rm = TRUE
+    ),
+    pm2.5_popw = weighted.mean(
+      `PM2.5_pre5_mean`,
+      Population,
+      na.rm = TRUE
+    ),
+    no_traffic_popw = weighted.mean(
+      no_traffic_pre5_mean,
+      Population,
+      na.rm = TRUE
+    ),
+    traffic_popw = weighted.mean(
+      Traffic_pre5_mean,
+      Population,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+# Reshape PM2.5 data for plotting
+plot_data_long <- joint_trends %>%
+  tidyr::pivot_longer(
+    cols = c(
+      pm2.5_popw,
+      no_traffic_popw,
+      traffic_popw
+    ),
+    names_to = "pm_series",
+    values_to = "pm_value"
+  ) %>%
+  dplyr::mutate(
+    pm_series_label = dplyr::recode(
+      pm_series,
+      pm2.5_popw = "Total PM2.5",
+      no_traffic_popw = "Non-Traffic PM2.5",
+      traffic_popw = "Traffic PM2.5"
+    )
+  )
+
+# Define displayed axis ranges
+lung_axis_min <- 20
+lung_axis_max <- 60
+
+pm_axis_min <- 0
+pm_axis_max <- ceiling(
+  max(plot_data_long$pm_value, na.rm = TRUE) / 3
+) * 3
+
+# Convert PM2.5 values to the left-axis plotting coordinates
+pm_scaling_factor <- (lung_axis_max - lung_axis_min) /
+  (pm_axis_max - pm_axis_min)
+
+# Generate final plot
+ggplot2::ggplot() +
+  ggplot2::geom_ribbon(
+    data = joint_trends,
+    ggplot2::aes(
+      x = year,
+      ymin = lung_axis_min,
+      ymax = lung_rate_per100k,
+      fill = "Lung Cancer Incidence"
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  ggplot2::geom_line(
+    data = plot_data_long,
+    ggplot2::aes(
+      x = year,
+      y = lung_axis_min +
+        (pm_value - pm_axis_min) * pm_scaling_factor,
+      color = pm_series_label
+    ),
+    linewidth = 2,
+    lineend = "round"
+  ) +
+  ggplot2::scale_y_continuous(
+    name = "Age-Adjusted Lung Cancer Incidence (per 100,000)",
+    limits = c(lung_axis_min, lung_axis_max),
+    breaks = c(20, 40, 60),
+    labels = c("20\n", "40", "60"),
+    expand = ggplot2::expansion(mult = 0),
+    sec.axis = ggplot2::sec_axis(
+      ~ (. - lung_axis_min) / pm_scaling_factor + pm_axis_min,
+      name = "PM2.5 Concentration (μg/m³)",
+      breaks = seq(pm_axis_min, pm_axis_max, by = 3)
+    )
+  ) +
+  ggplot2::scale_x_continuous(
+    name = "Year",
+    breaks = 2011:2019,
+    limits = c(2011, 2019),
+    expand = ggplot2::expansion(add = c(0.05, 0.05))
+  ) +
+  ggplot2::scale_fill_manual(
+    name = NULL,
+    values = c(
+      "Lung Cancer Incidence" = "#009E73"
+    )
+  ) +
+  ggplot2::scale_color_manual(
+    name = NULL,
+    breaks = c(
+      "Total PM2.5",
+      "Non-Traffic PM2.5",
+      "Traffic PM2.5"
+    ),
+    values = c(
+      "Total PM2.5" = "black",
+      "Non-Traffic PM2.5" = "#0072B2",
+      "Traffic PM2.5" = "red1"
+    )
+  ) +
+  ggplot2::guides(
+    fill = ggplot2::guide_legend(order = 1),
+    color = ggplot2::guide_legend(order = 2)
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.box.just = "center",
+    legend.spacing.x = grid::unit(2, "cm"),
+    legend.text = ggplot2::element_text(size = 20),
+    
+    axis.text.y = ggplot2::element_text(size = 20),
+    axis.text.x = ggplot2::element_text(
+      size = 20,
+      vjust = 0,
+      margin = ggplot2::margin(t = 15)
+    ),
+    axis.text.y.right = ggplot2::element_text(
+      size = 20,
+      margin = ggplot2::margin(l = 12)
+    ),
+    
+    axis.title = ggplot2::element_text(
+      size = 20,
+      face = "bold"
+    ),
+    axis.title.y = ggplot2::element_text(
+      color = "#009E73",
+      face = "bold"
+    ),
+    axis.title.y.right = ggplot2::element_text(
+      color = "black",
+      face = "bold",
+      margin = ggplot2::margin(l = 15)
+    ),
+    
+    plot.margin = ggplot2::margin(
+      t = 10,
+      r = 25,
+      b = 15,
+      l = 10
+    )
+  )
+```
+
+
+Calculate the lung cancer incidence range shown in the 2A graph
+```{r}
+
+incidence_range <- joint_trends %>%
+  dplyr::filter(
+    lung_rate_per100k == min(lung_rate_per100k, na.rm = TRUE) |
+      lung_rate_per100k == max(lung_rate_per100k, na.rm = TRUE)
+  ) %>%
+  dplyr::mutate(
+    value_type = dplyr::case_when(
+      lung_rate_per100k == min(lung_rate_per100k, na.rm = TRUE) ~ "Lowest",
+      lung_rate_per100k == max(lung_rate_per100k, na.rm = TRUE) ~ "Highest"
+    )
+  ) %>%
+  dplyr::select(
+    value_type,
+    year,
+    lung_rate_per100k
+  ) %>%
+  dplyr::arrange(lung_rate_per100k)
+
+incidence_range
+```
+
+
+FIGURE 2B -- SEER OLS regressions with County and State*Year FE (age-adjusted, county pop-weighted)
+```{r}
+
+library(fixest)
+library(dplyr)
+library(ggplot2)
+
+analysis_data <- readRDS("SEER_PM.rds") %>%
+  filter(between(year, 2011, 2019))
+
+# Population-weighted models with county and state-by-year fixed effects
+model_total <- feols(
+  Rate_adj ~ PM2.5_pre5_mean | county_fips + state^year,
+  data = analysis_data,
+  weights = ~ Population,
+  vcov = ~ county_fips
+)
+
+model_traffic <- feols(
+  Rate_adj ~ Traffic_pre5_mean | county_fips + state^year,
+  data = analysis_data,
+  weights = ~ Population,
+  vcov = ~ county_fips
+)
+
+model_nontraffic <- feols(
+  Rate_adj ~ no_traffic_pre5_mean | county_fips + state^year,
+  data = analysis_data,
+  weights = ~ Population,
+  vcov = ~ county_fips
+)
+
+summary(model_total)
+print(
+  parameters::model_parameters(
+    model_total,
+    vcov = ~ county_fips,
+    ci_method = "wald"
+  ),
+  digits = 3
+)
+
+summary(model_traffic)
+print(
+  parameters::model_parameters(
+    model_traffic,
+    vcov = ~ county_fips,
+    ci_method = "wald"
+  ),
+  digits = 3
+)
+
+summary(model_nontraffic)
+print(
+  parameters::model_parameters(
+    model_nontraffic,
+    vcov = ~ county_fips,
+    ci_method = "wald"
+  ),
+  digits = 3
+)
+
+# Forest plot values reported in the manuscript
+plot_data <- tibble::tribble(
+  ~model,                 ~beta,   ~lo,     ~hi, ~plot_color,
+  "Total PM2.5 pre-5:",   0.613, -0.255,  1.482, "black",
+  "Traffic pre-5:",       1.645,  0.391,  2.898, "red",
+  "Non-traffic pre-5:",  -0.350, -1.090,  0.389, "blue"
+) %>%
+  mutate(
+    model = factor(model, levels = rev(model)),
+    estimate_label = sprintf("%.2f (%.2f, %.2f)", beta, lo, hi)
+  )
+
+geom_text_size <- 8
+theme_text_size <- geom_text_size * ggplot2::.pt
+axis_limit <- 1.08 * max(abs(c(plot_data$lo, plot_data$hi)))
+x_breaks <- pretty(c(-axis_limit, axis_limit), n = 6)
+x_estimate <- 1.24 * axis_limit
+
+ggplot(plot_data, aes(x = beta, y = model)) +
+  ggstance::geom_errorbarh(
+    aes(xmin = lo, xmax = hi, color = plot_color),
+    height = 0.05,
+    linewidth = 0.3
+  ) +
+  geom_point(aes(color = plot_color), size = 2.5) +
+  scale_color_identity() +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_text(
+    aes(x = x_estimate, label = estimate_label),
+    hjust = 0,
+    size = geom_text_size,
+    color = "black"
+  ) +
+  scale_x_continuous(
+    name = expression("Change in cancer incidence per " * mu * "g/m"^3),
+    breaks = x_breaks,
+    limits = c(-axis_limit, axis_limit),
+    expand = c(0, 0),
+    oob = scales::oob_keep
+  ) +
+  ylab(NULL) +
+  coord_cartesian(clip = "off") +
+  annotate(
+    "text",
+    x = x_estimate,
+    y = Inf,
+    label = expression(Delta * " incidence rate (95% CI)"),
+    hjust = 0,
+    vjust = 3,
+    fontface = "bold",
+    size = geom_text_size
+  ) +
+  theme_minimal(base_size = theme_text_size) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.margin = margin(5.5, 300, 5.5, 60, unit = "pt"),
+    text = element_text(size = theme_text_size),
+    axis.text = element_text(size = theme_text_size),
+    axis.title = element_text(size = theme_text_size)
+  )
+  
+```
+
+
+
+FIGURE 2C
+```{r}
+library(dplyr)
+library(dlnm)
+library(fixest)
+library(ggplot2)
+
+seer_fips <- readRDS("SEER_PM.rds")
+
+outcome_year_min <- 2011
+outcome_year_max <- 2019
+max_lag <- 10
+exposure_year_min <- outcome_year_min - max_lag
+lag_basis <- list(fun = "ns", df = 3)
+rate_offset <- 1e-6
+
+fit_dlnm_curve <- function(exposure_var, exposure_label) {
+  panel <- seer_fips %>%
+    select(
+      county_fips, state, year, Population, Rate_adj,
+      exposure = all_of(exposure_var)
+    ) %>%
+    filter(year >= exposure_year_min, year <= outcome_year_max) %>%
+    arrange(county_fips, year) %>%
+    group_by(county_fips) %>%
+    filter(
+      min(year) == exposure_year_min,
+      max(year) == outcome_year_max,
+      n() == outcome_year_max - exposure_year_min + 1
+    ) %>%
+    ungroup()
+  
+  cross_basis <- crossbasis(
+    panel$exposure,
+    lag = c(0, max_lag),
+    argvar = list(fun = "lin"),
+    arglag = lag_basis,
+    group = panel$county_fips
+  )
+  
+  basis_data <- as.data.frame(cross_basis)
+  basis_names <- paste0("cb_", seq_len(ncol(basis_data)))
+  names(basis_data) <- basis_names
+  
+  analysis_data <- bind_cols(panel, basis_data) %>%
+    filter(
+      year >= outcome_year_min,
+      year <= outcome_year_max,
+      is.finite(Rate_adj),
+      if_all(all_of(basis_names), ~ is.finite(.x)),
+      is.finite(Population),
+      Population > 0
+    )
+  
+  model_formula <- as.formula(
+    paste0(
+      "log(Rate_adj + ", rate_offset, ") ~ ",
+      paste(basis_names, collapse = " + "),
+      " | county_fips + state^year"
+    )
+  )
+  
+  model <- feols(
+    model_formula,
+    data = analysis_data,
+    weights = ~ Population,
+    vcov = ~ county_fips
+  )
+  
+  coefficients <- coef(model)[basis_names]
+  covariance <- vcov(model)[basis_names, basis_names, drop = FALSE]
+  reference <- median(analysis_data$exposure, na.rm = TRUE)
+  
+  prediction <- crosspred(
+    cross_basis,
+    coef = coefficients,
+    vcov = covariance,
+    cen = reference,
+    at = reference + 1
+  )
+  
+  data.frame(
+    exposure = exposure_label,
+    lag = 0:max_lag,
+    rr = exp(as.vector(prediction$matfit[1, ])),
+    low = exp(as.vector(prediction$matlow[1, ])),
+    high = exp(as.vector(prediction$mathigh[1, ]))
+  )
+}
+
+plot_data <- bind_rows(
+  fit_dlnm_curve("Traffic_weighted_mean", "Traffic PM2.5"),
+  fit_dlnm_curve("no_traffic_weighted_mean", "Non-traffic PM2.5")
+) %>%
+  mutate(
+    exposure = factor(
+      exposure,
+      levels = c("Traffic PM2.5", "Non-traffic PM2.5")
+    )
+  )
+
+ggplot(
+  plot_data,
+  aes(x = lag, y = rr, color = exposure, fill = exposure)
+) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_ribbon(aes(ymin = low, ymax = high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1.1) +
+  scale_color_manual(
+    values = c("Traffic PM2.5" = "red", "Non-traffic PM2.5" = "blue")
+  ) +
+  scale_fill_manual(
+    values = c("Traffic PM2.5" = "red", "Non-traffic PM2.5" = "blue")
+  ) +
+  scale_x_reverse(breaks = 0:max_lag) +
+  labs(
+    x = "Years prior to incidence (lag)",
+    y = "Relative age-adjusted incidence rate\n(per +1 µg/m³)",
+    color = NULL,
+    fill = NULL
+  ) +
+  theme_bw(base_size = 24) +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 24),
+    legend.box.spacing = grid::unit(0, "pt"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+
+SUPPLEMENTARY TABLE 1
+```{r}
+
+library(dplyr)
+library(survey)
+library(tableone)
+library(gt)
+library(tibble)
+library(Hmisc)
+
+#load SEER / PM_combined data
+seer_fips <- readRDS("SEER_PM.rds")
+
+seer_fips$Median.household.income.raw.value <- as.numeric(seer_fips$Median.household.income.raw.value)
+seer_fips$Air.pollution.ozone.days.raw.value <- as.numeric(seer_fips$Air.pollution.ozone.days.raw.value)
+
+seer_fips$age65_perc <- as.numeric(seer_fips$X..65.and.older.raw.value) * 100
+seer_fips$rural_perc <- as.numeric(seer_fips$X..Rural.raw.value) * 100
+seer_fips$black_perc <- as.numeric(seer_fips$X..Non.Hispanic.African.American.raw.value) * 100
+seer_fips$hispanic_perc <- as.numeric(seer_fips$X..Hispanic.raw.value) * 100
+seer_fips$asian_perc <- as.numeric(seer_fips$X..Asian.raw.value) * 100
+seer_fips$income_z <- scale(as.numeric(seer_fips$Median.household.income.raw.value))
+
+seer_filtered <- seer_fips %>%
+  filter(year >= 2011 & year <= 2019)
+
+
+seer_filtered$traffic_quartile <- cut(
+  seer_filtered$Traffic_pre5_mean,
+  breaks = quantile(seer_filtered$Traffic_pre5_mean, probs = c(0, .25, .5, .75, 1), na.rm = TRUE),
+  include.lowest = TRUE,
+  labels = c("Q1", "Q2", "Q3", "Q4")
+)
+
+seer_filtered$radon_zone1 <- ifelse(seer_filtered$radon_zone == 1, 1, 0)
+
+seer_filtered$radon_zone1_pct <- ifelse(seer_filtered$radon_zone == 1, 100, 0)
+
+label(seer_filtered$Traffic_pre5_mean) <- "Traffic PM2.5 (µg/m³)"
+label(seer_filtered$no_traffic_pre5_mean) <- "Non-traffic PM2.5 (µg/m³)"
+label(seer_filtered$age65_perc) <- "% ≥65 years"
+label(seer_filtered$rural_perc) <- "% Rural"
+label(seer_filtered$black_perc) <- "% Black"
+label(seer_filtered$hispanic_perc) <- "% Hispanic"
+label(seer_filtered$asian_perc) <- "% Asian"
+label(seer_filtered$Median.household.income.raw.value) <- "Median Household Income ($)"
+label(seer_filtered$smoke_prev_2011) <- "Smoking Prevalence (2011, %)"
+label(seer_filtered$Air.pollution.ozone.days.raw.value) <- "Annual Ozone Days"
+label(seer_filtered$radon_zone) <- "Radon Zone"
+label(seer_filtered$radon_zone1) <- "Radon Zone 1 (%)"
+label(seer_filtered$radon_zone1_pct) <- "Radon Zone 1 (%)"
+label(seer_filtered$Rate_adj) <- "Age Adjusted Lung Cancer Incidence (per 100k pop)"
+
+# Aggregate Longitudinal Data
+seer_aggregated <- seer_filtered %>%
+  group_by(county_fips) %>% 
+  summarise(
+    mean_population = mean(Population, na.rm = TRUE),
+    Rate_adj = mean(Rate_adj, na.rm = TRUE),
+    PM2.5_pre5_mean = mean(PM2.5_pre5_mean, na.rm = TRUE),
+    Traffic_pre5_mean = mean(Traffic_pre5_mean, na.rm = TRUE),
+    no_traffic_pre5_mean = mean(no_traffic_pre5_mean, na.rm = TRUE),
+    age65_perc = mean(age65_perc, na.rm = TRUE),
+    rural_perc = mean(rural_perc, na.rm = TRUE),
+    black_perc = mean(black_perc, na.rm = TRUE),
+    hispanic_perc = mean(hispanic_perc, na.rm = TRUE),
+    asian_perc = mean(asian_perc, na.rm = TRUE),
+    Median.household.income.raw.value = mean(Median.household.income.raw.value, na.rm = TRUE),
+    smoke_prev_2011 = mean(smoke_prev_2011, na.rm = TRUE),
+    Air.pollution.ozone.days.raw.value = mean(Air.pollution.ozone.days.raw.value, na.rm = TRUE),
+    radon_zone1_pct = mean(radon_zone1_pct, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+#calculate the total average population
+total_study_pop <- sum(seer_aggregated$mean_population, na.rm = TRUE)
+
+# Weight by County Population
+weighted_design <- svydesign(ids = ~1, weights = ~mean_population, data = seer_aggregated)
+
+# CREATE WEIGHTED TABLE ONE
+vars_to_summarize <- c("Rate_adj", "PM2.5_pre5_mean", "Traffic_pre5_mean", "no_traffic_pre5_mean", 
+                        "age65_perc", "rural_perc", "black_perc", "hispanic_perc", 
+                       "asian_perc", "Median.household.income.raw.value", 
+                       "smoke_prev_2011", "Air.pollution.ozone.days.raw.value", 
+                       "radon_zone1_pct")
+
+tab1_obj <- svyCreateTableOne(vars = vars_to_summarize, data = weighted_design)
+
+# PREPARE THE DATA FOR GT (MANUAL LABELING)
+tab1_matrix <- print(tab1_obj, printToggle = FALSE, noSpaces = TRUE, varLabels = FALSE)
+table1_df <- as.data.frame(tab1_matrix)
+
+table1_df[1, 1] <- as.character(nrow(seer_aggregated))
+
+ordered_labels <- c(
+  "Total Number of Counties",
+  "Lung Cancer Incidence (Age adjusted, per 100k pop)",
+  "Total PM2.5 (µg/m³)",
+  "Traffic PM2.5 (µg/m³)",
+  "Non-traffic PM2.5 (µg/m³)",
+  "% ≥65 years",
+  "% Rural",
+  "% Black",
+  "% Hispanic",
+  "% Asian",
+  "Median Household Income ($)",
+  "Smoking Prevalence (2011, %)",
+  "Annual Ozone Days",
+  "Radon Zone 1 (%)"
+)
+
+# Add the labels as a new column
+table1_final <- table1_df %>%
+  mutate(Variable = ordered_labels) %>%
+  select(Variable, Overall)
+
+# 5. Render final table
+table1_final %>%
+  gt() %>%
+  cols_label(
+    Variable = md("**County Characteristic**"),
+    Overall = md("**Mean (SD) or N**")
+  ) %>%
+  tab_options(
+    table.font.names = "Arial",
+    table.border.top.color = "black",
+    table.border.bottom.color = "black",
+    table.width = px(650),
+    column_labels.font.weight = "bold"
+  ) %>%
+  # Bold the Outcome and Pollution Rows
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(rows = c(2, 3, 4, 5, 6, 7)) 
+  ) %>%
+  # Format the "n" row to look like a count
+  tab_style(
+    style = cell_text(style = "italic"),
+    locations = cells_body(rows = 1)
+  )
+```
+
+
+
