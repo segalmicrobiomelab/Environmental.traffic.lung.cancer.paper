@@ -1,0 +1,486 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+FIGURE 3A
+```{r}
+library(tidyverse)
+
+map_df <- read.csv('immcohort_sourcespecific_pm25.csv')
+
+map_df <- map_df %>%
+  rename(
+    LATITUDE = lat,
+    LONGITUDE = lon 
+  )
+
+###Create binary variables###
+map_df$PM2.5_mean_pre5yr_bin <- ifelse(map_df$PM2.5_mean_pre5yr > median(map_df$PM2.5_mean_pre5yr, na.rm = TRUE), 1, 0)
+map_df$traffic_pre5yr_bin <- ifelse(map_df$Traffic_mean_pre5yr > median(map_df$Traffic_mean_pre5yr, na.rm = TRUE), 1, 0)
+map_df$notraffic_pre5yr_bin <- ifelse(map_df$notraffic_pre5yr > median(map_df$notraffic_pre5yr, na.rm = TRUE), 1, 0)
+
+##########OpenStreetMap Leaflet map##############
+library(mapview)
+library(leaflet)
+library(leaflet.providers)
+
+# base tiles as reference map
+base_map_ref <- function(df) {
+  leaflet(data = df) %>%
+    addProviderTiles(providers$Stadia.StamenTonerLite, group = "Minimal Gray") %>%
+    addProviderTiles(providers$OpenStreetMap, group = "OSM") %>%
+    addProviderTiles(providers$CartoDB.Positron, group = "Light") %>%
+    setView(lng = -74.006, lat = 40.7128, zoom = 10)
+}
+
+############################################################
+# PM2.5 map using the reference background
+############################################################
+pm_pal <- colorFactor(
+  palette = c("darkblue", "red1"),
+  domain  = map_df$PM2.5_mean_pre5yr_bin
+)
+
+map <- base_map_ref(map_df) %>%
+  addCircleMarkers(
+    ~LONGITUDE, ~LATITUDE,
+    color       = ~pm_pal(PM2.5_mean_pre5yr_bin),
+    fillColor   = ~pm_pal(PM2.5_mean_pre5yr_bin),
+    fillOpacity = 0.7,
+    radius      = 4,
+    stroke      = TRUE,
+    weight      = 1
+  ) %>%
+  addLegend(
+    position  = "topright",
+    pal       = pm_pal,
+    values    = ~PM2.5_mean_pre5yr_bin,
+    title     = "Total PM2.5",
+    opacity   = 1,
+    labFormat = function(type, cuts, p) {
+      ifelse(cuts == 1, "High",
+             ifelse(cuts == 0, "Low", as.character(cuts)))
+    }
+  )
+
+map
+
+############################################################
+# Traffic map using the reference background
+############################################################
+pm_pal <- colorFactor(
+  palette = c("lightpink2", "red"),
+  domain  = map_df$traffic_pre5yr_bin
+)
+
+map <- base_map_ref(map_df) %>%
+  addCircleMarkers(
+    ~LONGITUDE, ~LATITUDE,
+    color       = ~pm_pal(traffic_pre5yr_bin),
+    fillColor   = ~pm_pal(traffic_pre5yr_bin),
+    fillOpacity = 0.7,
+    radius      = 5,
+    stroke      = TRUE,
+    weight      = 1
+  ) %>%
+  addLegend(
+    position  = "topright",
+    pal       = pm_pal,
+    values    = ~traffic_pre5yr_bin,
+    title     = "Traffic PM2.5",
+    opacity   = 1,
+    labFormat = function(type, cuts, p) {
+      ifelse(cuts == 1, "High",
+             ifelse(cuts == 0, "Low", as.character(cuts)))
+    }
+  )
+
+map
+
+############################################################
+# Non-Traffic map using the reference background
+############################################################
+pm_pal <- colorFactor(
+  palette = c("cyan3", "blue"),
+  domain  = map_df$notraffic_pre5yr_bin
+)
+
+map <- base_map_ref(map_df) %>%
+  addCircleMarkers(
+    ~LONGITUDE, ~LATITUDE,
+    color       = ~pm_pal(notraffic_pre5yr_bin),
+    fillColor   = ~pm_pal(notraffic_pre5yr_bin),
+    fillOpacity = 0.7,
+    radius      = 5,
+    stroke      = TRUE,
+    weight      = 1
+  ) %>%
+  addLegend(
+    position  = "topright",
+    pal       = pm_pal,
+    values    = ~notraffic_pre5yr_bin,
+    title     = "Non-traffic PM2.5",
+    opacity   = 1,
+    labFormat = function(type, cuts, p) {
+      ifelse(cuts == 1, "High",
+             ifelse(cuts == 0, "Low", as.character(cuts)))
+    }
+  )
+
+map
+
+```
+
+3B. Quadrant map
+```{r}
+
+envt_dat_1 <- read.csv('immcohort_sourcespecific_pm25.csv')
+
+####visualize the different quadrants of high/low traffic and no_traffic pollution patients ####
+t_med <- median(envt_dat_1$Traffic_mean_pre5yr, na.rm = TRUE)
+n_med <- median(envt_dat_1$notraffic_pre5yr, na.rm = TRUE)
+
+############
+##### plot the quadrants with background fill
+############
+
+ggplot(envt_dat_1, aes(x = Traffic_mean_pre5yr, y = notraffic_pre5yr)) +
+  # Background shading (behind points)
+  annotate(
+    "rect",
+    xmin = t_med, xmax = Inf,
+    ymin = -Inf, ymax = Inf,
+    fill = "#0072B2", alpha = 0.1   # blue: x > t_med
+  ) +
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = Inf,
+    ymin = n_med, ymax = Inf,
+    fill = "#E69F00", alpha = 0.1   # orange: y > n_med
+  ) +
+  # Points + medians
+  geom_point(size = 3, alpha = 0.85, color = "black") +
+  geom_vline(xintercept = t_med, linetype = "dashed") +
+  geom_hline(yintercept = n_med, linetype = "dashed") +
+  labs(
+    x = "Traffic PM2.5 (µg/m³)",
+    y = "Non-Traffic PM2.5 (µg/m³)",
+    title = "Traffic vs Non-Traffic PM2.5 Exposure (Median Quadrants)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14, face = "bold"),
+    axis.title.y = element_text(size = 14, face = "bold"),
+    axis.text.x  = element_text(size = 12),
+    axis.text.y  = element_text(size = 12),
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.position = "none"
+  )
+
+```
+
+3C-3E. Transcriptome DGE, Heatmap, Dotplot, and CNET plot
+```{r}
+
+library(edgeR)
+library(dplyr)
+library(ggplot2)
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+
+# Load counts and metadata
+metadata <- read.csv(  "immcohort_sourcespecific_pm25.csv", check.names = FALSE)
+
+raw_counts <- read.delim2(  "RNA_Host_Transcriptome_20230608.txt", check.names = FALSE)
+
+gene_ids <- make.unique(as.character(raw_counts[[1]]))
+count_data <- raw_counts[, -1, drop = FALSE]
+rownames(count_data) <- gene_ids
+rownames(metadata) <- make.unique(as.character(metadata$X))
+
+clean_sample_ids <- function(x) {
+  x <- trimws(x)
+  x <- sub("^X(?=[0-9])", "", x, perl = TRUE)
+  gsub("_", ".", x, fixed = TRUE)
+}
+
+colnames(count_data) <- clean_sample_ids(colnames(count_data))
+rownames(metadata) <- clean_sample_ids(rownames(metadata))
+
+shared_samples <- intersect(colnames(count_data), rownames(metadata))
+count_data <- count_data[, shared_samples, drop = FALSE]
+metadata <- metadata[
+  match(colnames(count_data), rownames(metadata)),
+  ,drop = FALSE
+]
+
+stopifnot(identical(colnames(count_data), rownames(metadata)))
+
+count_matrix <- as.matrix(count_data)
+storage.mode(count_matrix) <- "integer"
+
+# High traffic/low non-traffic versus low traffic/high non-traffic
+group_levels <- c("LowT_HighNT", "HighT_LowNT")
+keep_samples <- !is.na(metadata$quadrant) &
+  metadata$quadrant %in% group_levels
+
+metadata_dge <- metadata[keep_samples, , drop = FALSE]
+counts_dge <- count_matrix[, rownames(metadata_dge), drop = FALSE]
+group <- factor(metadata_dge$quadrant, levels = group_levels)
+
+cat("\nSample sizes:\n")
+print(table(group))
+
+# edgeR quasi-likelihood analysis
+dge <- DGEList(counts = counts_dge, group = group)
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+keep_genes <- filterByExpr(dge, design = design)
+cat("\nGenes before filtering:", nrow(dge), "\n")
+cat("Genes after filtering:", sum(keep_genes), "\n")
+
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge, method = "TMM")
+
+cat("\nLibrary sizes and normalization factors:\n")
+print(dge$samples)
+
+dge <- estimateDisp(dge, design)
+plotBCV(dge)
+
+fit <- glmQLFit(dge, design, robust = TRUE)
+contrast <- makeContrasts(
+  HighT_LowNT - LowT_HighNT,
+  levels = design
+)
+test <- glmQLFTest(fit, contrast = contrast)
+
+dge_results <- topTags(test, n = Inf)$table %>%
+  tibble::rownames_to_column("gene") %>%
+  mutate(
+    direction = if_else(
+      logFC > 0,
+      "Higher_in_HighT_LowNT",
+      "Higher_in_LowT_HighNT"
+    ),
+    sig_FDR_0.05 = FDR < 0.05,
+    sig_FDR_0.25 = FDR < 0.25,
+    rank_stat = sign(logFC) * -log10(PValue)
+  )
+
+cat("\nTop genes:\n")
+print(head(dge_results))
+cat("\nNumber significant at FDR < 0.05:\n")
+print(sum(dge_results$sig_FDR_0.05, na.rm = TRUE))
+cat("\nNumber significant at FDR < 0.25:\n")
+print(sum(dge_results$sig_FDR_0.25, na.rm = TRUE))
+
+# Volcano plot
+fdr_threshold <- 0.25
+
+volcano_data <- dge_results %>%
+  filter(!is.na(logFC), !is.na(FDR), !is.na(PValue)) %>%
+  mutate(
+    significance = -log10(pmax(FDR, .Machine$double.xmin)),
+    status = case_when(
+      logFC > 0 & FDR < fdr_threshold ~ "Up_in_HighT_LowNT",
+      logFC < 0 & FDR < fdr_threshold ~ "Up_in_LowT_HighNT",
+      TRUE ~ "NS"
+    ),
+    label = if_else(status == "NS", NA_character_, gene)
+  )
+
+ggplot(volcano_data, aes(x = logFC, y = significance)) +
+  geom_point(aes(color = status), alpha = 0.8, size = 1.8) +
+  ggrepel::geom_text_repel(
+    aes(label = label),
+    size = 4,
+    force = 25,
+    segment.color = "grey",
+    segment.alpha = 0.5,
+    na.rm = TRUE,
+    max.overlaps = 10
+  ) +
+  geom_hline(
+    yintercept = -log10(fdr_threshold),
+    color = "red",
+    linetype = "dashed"
+  ) +
+  scale_color_manual(
+    values = c(
+      "Up_in_HighT_LowNT" = "red",
+      "Up_in_LowT_HighNT" = "blue",
+      "NS" = "grey70"
+    )
+  ) +
+  labs(
+    x = expression("Effect size: log"[2] * "FC"),
+    y = expression("-log"[10] * "(FDR)"),
+    title = "HighT_LowNT vs LowT_HighNT"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_line(
+      linetype = "dashed",
+      linewidth = 0.5,
+      colour = "grey80"
+    ),
+    panel.grid.minor = element_blank(),
+    strip.background = element_blank(),
+    axis.title = element_text(size = 20, face = "bold"),
+    axis.text = element_text(colour = "black", size = 10),
+    axis.ticks = element_blank(),
+    legend.position = "none"
+  )
+
+# GSEA
+gsea_input <- dge_results %>%
+  filter(!is.na(gene), gene != "", is.finite(rank_stat))
+
+gene_list <- gsea_input$rank_stat
+names(gene_list) <- gsea_input$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+
+# Hallmark GSEA
+ msig_collection <- msigdbr(
+   species = "Homo sapiens",
+   collection = "H"
+ )
+ 
+# Reactome GSEA
+# Uncomment this block to replace the default Hallmark collection.
+#msig_collection <- msigdbr(
+#  species = "Homo sapiens",
+#  collection = "C2",
+#  subcollection = "CP:REACTOME"
+#)
+
+# Gene Ontology: Biological Process GSEA
+# Uncomment this block to replace the default Hallmark collection.
+# msig_collection <- msigdbr(
+#   species = "Homo sapiens",
+#   collection = "C5",
+#   subcollection = "GO:BP"
+# )
+
+term2gene <- msig_collection %>%
+  transmute(term = gs_name, gene = gene_symbol) %>%
+  distinct()
+
+overlap_n <- length(intersect(names(gene_list), term2gene$gene))
+message("Number of genes overlapping the selected MSigDB collection: ", overlap_n)
+
+set.seed(42)
+gsea_result <- GSEA(
+  geneList = gene_list,
+  TERM2GENE = term2gene,
+  pvalueCutoff = 0.25,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500,
+  verbose = FALSE,
+  seed = TRUE
+)
+
+# Clean labels for Hallmark, Reactome, or GO:BP results
+clean_pathway_label <- function(x) {
+  x %>%
+    stringr::str_remove("^(HALLMARK|REACTOME|GOBP)[ _]+") %>%
+    stringr::str_replace_all("_", " ")
+}
+
+dotplot(
+  gsea_result,
+  showCategory = 10,
+  split = ".sign",
+  color = "p.adjust"
+) +
+  facet_grid(. ~ .sign) +
+  scale_fill_gradientn(
+    colours = c("red", "mistyrose", "white"),
+    values = scales::rescale(
+      c(0.001, 0.05, 0.15),
+      from = c(0.001, 0.15)
+    ),
+    limits = c(0.001, 0.15),
+    breaks = c(0.01, 0.05, 0.10),
+    labels = c("0.01", "0.05", "0.10"),
+    oob = scales::squish,
+    name = "p.adjust"
+  ) +
+  scale_y_discrete(labels = clean_pathway_label) +
+  theme_bw(base_size = 10)
+
+clean_network_labels <- function(plot_object) {
+  if ("name" %in% names(plot_object$data)) {
+    plot_object$data$name <- clean_pathway_label(plot_object$data$name)
+  }
+  if ("label" %in% names(plot_object$data)) {
+    plot_object$data$label <- clean_pathway_label(plot_object$data$label)
+  }
+  plot_object
+}
+
+network_all_labels <- cnetplot(
+  gsea_result,
+  showCategory = 10,
+  foldChange = gene_list
+) %>%
+  clean_network_labels()
+
+network_all_labels +
+  scale_colour_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  ggtitle("Pathway–Gene Network")
+
+network_pathway_labels <- cnetplot(
+  gsea_result,
+  showCategory = 15,
+  foldChange = gene_list,
+  node_label = "category"
+) %>%
+  clean_network_labels()
+
+network_pathway_labels +
+  scale_colour_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  )
+
+ridgeplot(gsea_result) +
+  ggtitle("GSEA Ridgeplot: HighT_LowNT vs LowT_HighNT")
+
+gsea_table <- as.data.frame(gsea_result)
+table(gsea_table$core_enrichment)
+
+top_pathways <- bind_rows(
+  gsea_table %>%
+    filter(p.adjust < 0.05) %>%
+    arrange(NES) %>%
+    slice_head(n = 10),
+  gsea_table %>%
+    filter(p.adjust < 0.05) %>%
+    arrange(desc(NES)) %>%
+    slice_head(n = 10)
+)
+
+ggplot(top_pathways, aes(x = NES, y = reorder(Description, NES))) +
+  geom_col() +
+  labs(
+    x = "Normalized Enrichment Score",
+    y = NULL,
+    title = "Top GSEA pathways"
+  ) +
+  theme_classic()
+
+```
