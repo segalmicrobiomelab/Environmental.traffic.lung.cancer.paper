@@ -747,8 +747,6 @@ library(dplyr)
 library(survey)
 library(tableone)
 library(gt)
-library(tibble)
-library(Hmisc)
 
 #load SEER / PM_combined data
 seer_fips <- readRDS("SEER_PM.rds")
