@@ -5,7 +5,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 FIGURE 3A
 ```{r}
-library(tidyverse)
+library(dplyr)
+library(leaflet)
+library(leaflet.providers)
 
 map_df <- read.csv('immcohort_sourcespecific_pm25.csv')
 
@@ -20,10 +22,7 @@ map_df$PM2.5_mean_pre5yr_bin <- ifelse(map_df$PM2.5_mean_pre5yr > median(map_df$
 map_df$traffic_pre5yr_bin <- ifelse(map_df$Traffic_mean_pre5yr > median(map_df$Traffic_mean_pre5yr, na.rm = TRUE), 1, 0)
 map_df$notraffic_pre5yr_bin <- ifelse(map_df$notraffic_pre5yr > median(map_df$notraffic_pre5yr, na.rm = TRUE), 1, 0)
 
-##########OpenStreetMap Leaflet map##############
-library(mapview)
-library(leaflet)
-library(leaflet.providers)
+
 
 # base tiles as reference map
 base_map_ref <- function(df) {
