@@ -1,0 +1,443 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Mouse transcriptome DGE: edgeR-only QL GLM
+```{r}
+
+library(edgeR)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(msigdbr)
+library(clusterProfiler)
+
+########################################
+# Load and prepare counts
+########################################
+
+mouse_counts <- read.delim2("RNA_Host_Transcriptome_cohort2.tsv", check.names = FALSE)
+
+rownames(mouse_counts) <- make.unique(as.character(mouse_counts$gene))
+mouse_counts$gene <- NULL
+
+# Build metadata from original column names
+sample_names <- colnames(mouse_counts)
+
+mouse_metadata <- data.frame(sample_name = sample_names) %>%
+  mutate(
+    sample_name = str_remove(sample_name, "\\.L00[0-9]$"),
+    mouse_id = str_extract(sample_name, "^M[0-9]+"),
+    pollution_type = str_extract(str_to_lower(sample_name), "nontraffic|traffic|pbs")
+  ) %>%
+  distinct(sample_name, .keep_all = TRUE)
+
+rownames(mouse_metadata) <- mouse_metadata$sample_name
+
+# Sum lanes from the same biological sample
+clean_sample_names <- str_remove(colnames(mouse_counts), "\\.L00[0-9]$")
+mouse_counts <- t(rowsum(t(as.matrix(mouse_counts)), group = clean_sample_names))
+
+# Align metadata and counts
+mouse_metadata <- mouse_metadata[colnames(mouse_counts), , drop = FALSE]
+
+########################################
+# Subset to groups of interest
+########################################
+
+v <- "pollution_type"
+
+mouse_metadata[[v]] <- factor(
+  mouse_metadata[[v]],
+  levels = c("pbs", "traffic", "nontraffic")
+)
+
+keep_samples <- !is.na(mouse_metadata[[v]]) &
+  mouse_metadata[[v]] %in% c("pbs", "traffic", "nontraffic")
+
+mouse_metadata_analysis <- mouse_metadata[keep_samples, , drop = FALSE]
+mouse_counts_analysis <- mouse_counts[, rownames(mouse_metadata_analysis), drop = FALSE]
+
+stopifnot(all(colnames(mouse_counts_analysis) == rownames(mouse_metadata_analysis)))
+
+table(mouse_metadata_analysis[[v]])
+colSums(mouse_counts_analysis)
+
+########################################
+# edgeR QL GLM
+########################################
+
+group <- mouse_metadata_analysis[[v]]
+
+dge <- DGEList(
+  counts = mouse_counts_analysis,
+  group = group
+)
+
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+# edgeR expression filtering
+keep_genes <- filterByExpr(dge, design = design)
+
+cat("Genes before filtering:", nrow(dge), "\n")
+cat("Genes after filtering:", sum(keep_genes), "\n")
+
+dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+
+# TMM normalization
+dge <- calcNormFactors(dge, method = "TMM")
+
+# Diagnostics
+plotMDS(
+  dge,
+  labels = group,
+  col = as.numeric(group),
+  main = "MDS plot: mouse transcriptome"
+)
+
+legend(
+  "topright",
+  legend = levels(group),
+  col = seq_along(levels(group)),
+  pch = 16,
+  bty = "n"
+)
+
+# Dispersion and QL GLM fit
+dge <- estimateDisp(dge, design)
+plotBCV(dge)
+
+fit <- glmQLFit(dge, design, robust = TRUE)
+
+########################################
+# Pairwise contrast
+########################################
+
+contrast_nontraffic_vs_traffic <- makeContrasts(
+  traffic - nontraffic,
+  levels = design
+)
+
+qlf_nontraffic_vs_traffic <- glmQLFTest(
+  fit,
+  contrast = contrast_nontraffic_vs_traffic
+)
+
+results_nontraffic_vs_traffic <- topTags(
+  qlf_nontraffic_vs_traffic,
+  n = Inf
+)$table
+
+# Add gene column
+results_nontraffic_vs_traffic$gene <- rownames(results_nontraffic_vs_traffic)
+
+# Positive logFC interpretation:
+# results_nontraffic_vs_traffic:  positive = higher in traffic vs nontraffic
+
+```
+
+Volcano plots
+```{r}
+########################################
+# Volcano plot helper
+########################################
+
+make_volcano <- function(results, title, alpha = 0.05) {
+  
+
+  res <- results %>%
+    as.data.frame() %>%
+    mutate(
+      Gene.symbol = if ("gene" %in% colnames(.)) gene else rownames(.),
+      logFC = as.numeric(logFC),
+      PValue = as.numeric(PValue),
+      FDR = as.numeric(FDR)
+    ) %>%
+    filter(!is.na(logFC), !is.na(PValue), !is.na(FDR)) %>%
+    mutate(
+      FDR_plot = pmax(FDR, .Machine$double.xmin),
+      sig = -log10(FDR_plot),
+      status = case_when(
+        logFC > 0 & FDR < alpha ~ "Up",
+        logFC < 0 & FDR < alpha ~ "Down",
+        TRUE ~ "NS"
+      ),
+      label = ifelse(status == "NS", NA, Gene.symbol)
+    )
+  
+res <- res %>%
+  mutate(
+    FDR_plot = pmax(FDR, .Machine$double.xmin),
+    sig = -log10(FDR_plot),
+    status = case_when(
+      logFC > 0 & FDR < alpha ~ "Up",
+      logFC < 0 & FDR < alpha ~ "Down",
+      TRUE ~ "NS"
+    )
+  ) %>%
+  group_by(status) %>%
+  arrange(FDR, .by_group = TRUE) %>%
+  mutate(
+    label = ifelse(status != "NS" & row_number() <= 10, Gene.symbol, NA)
+  ) %>%
+  ungroup()
+  
+    
+  p <- ggplot(res, aes(x = logFC, y = sig)) +
+    geom_point(aes(color = status), alpha = 0.8, size = 1.8) +
+    geom_text_repel(
+      aes(label = label),
+      size = 4,
+      force = 25,
+      segment.color = "grey",
+      segment.alpha = 0.5,
+      na.rm = TRUE,
+      max.overlaps = 10
+    ) +
+    geom_hline(
+      yintercept = -log10(alpha),
+      color = "red",
+      linetype = "dashed"
+    ) +
+    scale_color_manual(
+      values = c("Up" = "red", "Down" = "blue", "NS" = "grey70")
+    ) +
+    labs(
+      title = title,
+      x = expression("Effect size: log"[2]*"FC"),
+      y = expression("-log"[10]*"(FDR)")
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dashed", linewidth = 0.5, colour = "grey80"),
+      panel.grid.minor = element_blank(),
+      strip.background = element_blank(),
+      axis.title = element_text(size = 20, face = "bold"),
+      axis.text.x = element_text(colour = "black", size = 10),
+      axis.text.y = element_text(colour = "black", size = 10),
+      axis.ticks = element_blank(),
+      legend.position = "none"
+    )
+  
+  print(p)
+  message("Genes with FDR < ", alpha, ": ", sum(res$FDR < alpha, na.rm = TRUE))
+  
+  invisible(res)
+}
+
+volcano_nontraffic_vs_traffic <- make_volcano(
+  results_nontraffic_vs_traffic,
+  "Traffic vs Nontraffic"
+)
+
+```
+
+Mouse GSEA figure 4D
+```{r}
+########################################
+# GSEA helper: MSigDB Hallmark, mouse symbols
+# Select within this codeblock if you want to run Hallmark, GSEA, or Gene Ontology:BP
+########################################
+
+run_mouse_gsea <- function(results, title, p_cutoff = 0.05, showCategory = 8) {
+  
+  ########################################
+  # Prepare ranked gene list
+  ########################################
+  
+  res <- results %>%
+    as.data.frame() %>%
+    mutate(
+      Gene.symbol = if ("gene" %in% colnames(.)) gene else rownames(.),
+      logFC = as.numeric(logFC),
+      PValue = as.numeric(PValue),
+      rank_stat = sign(logFC) * -log10(PValue)
+    ) %>%
+    filter(
+      !is.na(Gene.symbol),
+      Gene.symbol != "",
+      !is.na(rank_stat),
+      is.finite(rank_stat)
+    )
+  
+  gene_list <- res$rank_stat
+  names(gene_list) <- res$Gene.symbol
+  
+  # Collapse duplicate gene symbols, keeping strongest absolute statistic
+  gene_list <- tapply(gene_list, names(gene_list), function(x) {
+    x[which.max(abs(x))]
+  })
+  
+  gene_list <- setNames(as.numeric(gene_list), names(gene_list))
+  gene_list <- sort(gene_list, decreasing = TRUE)
+  
+  ########################################
+  # Get mouse Hallmark gene sets
+  ########################################
+
+#Hallmark
+  msig_collection <- msigdbr(
+    species = "Mus musculus",
+    collection = "H"
+  )
+  
+
+clean_hallmark_label <- function(x) {
+  x %>%
+    str_remove("^HALLMARK[ _]+") %>%   
+    str_replace_all("_", " ")          
+}
+
+#  # Reactome  
+#  msig_collection <- msigdbr(
+#  species = "Mus musculus",
+#  collection = "C2",
+#  subcollection = "CP:REACTOME"
+#  )
+  
+  # Gene Ontology: Biological Process
+#  msig_collection <- msigdbr(
+#  species = "Mus musculus",
+#  collection = "C5",
+#  subcollection = "GO:BP"
+#  )
+
+  term2gene_df <- msig_collection %>%
+    dplyr::select(gs_name, gene_symbol) %>%
+    dplyr::rename(
+      term = gs_name,
+      gene = gene_symbol
+    ) %>%
+    dplyr::distinct()
+  
+  overlap_n <- length(intersect(names(gene_list), term2gene_df$gene))
+  message(title, " — genes overlapping MSigDB Hallmark: ", overlap_n)
+  
+  ########################################
+  # Run GSEA
+  ########################################
+  
+  set.seed(42)
+  
+  gsea_result <- GSEA(
+    geneList = gene_list,
+    TERM2GENE = term2gene_df,
+    pvalueCutoff = p_cutoff,
+    pAdjustMethod = "BH",
+    minGSSize = 10,
+    maxGSSize = 500,
+    verbose = FALSE,
+    seed = TRUE
+  )
+  
+  ########################################
+  # Dotplot: cleaner RMD-friendly version
+  ########################################
+  
+dot <- dotplot(
+  gsea_result,
+  showCategory = showCategory,
+  split = ".sign",
+  color = "p.adjust",
+  label_format = 40
+) +
+  facet_grid(. ~ .sign) +
+  ggtitle(paste0("Top Enriched Pathways: ", title)) +
+  scale_y_discrete(labels = clean_hallmark_label) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 9, color = "black"),
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9)
+  )
+  
+  
+  print(dot)
+  
+  ########################################
+  # Cnetplot: pathway labels only
+  ########################################
+
+# Create a temporary plotting copy with cleaned Hallmark pathway names
+gsea_result_cnet <- gsea_result
+
+gsea_result_cnet@result$Description <- clean_hallmark_label(
+  gsea_result_cnet@result$Description
+)
+
+cnet <- cnetplot(
+  gsea_result_cnet,
+  showCategory = showCategory,
+  foldChange = gene_list,
+  node_label = "category"
+) +
+  scale_colour_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+  ) +
+  ggtitle(paste0("Pathway–Gene Network: ", title)) +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      hjust = 0.5
+    )
+  )
+
+print(cnet)
+
+  ########################################
+  # Ridgeplot
+  ########################################
+  
+  ridge <- ridgeplot(
+    gsea_result,
+    showCategory = showCategory
+  ) +
+    ggtitle(paste0("GSEA Ridgeplot: ", title)) +
+    theme_bw(base_size = 12) +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 9, color = "black")
+    )
+  
+  print(ridge)
+  
+  return(list(
+    gsea_result = gsea_result,
+    gene_list = gene_list,
+    dotplot = dot,
+    cnetplot = cnet,
+    ridgeplot = ridge
+  ))
+}
+```
+
+
+```{r}
+########################################
+# Run GSEA 
+########################################
+
+gsea_nontraffic_vs_traffic <- run_mouse_gsea(
+  results_nontraffic_vs_traffic,
+  title = "Traffic vs Nontraffic",
+  showCategory = 8
+)
+
+
+```
+```
+
+
+
