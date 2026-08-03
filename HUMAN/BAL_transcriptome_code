@@ -483,3 +483,161 @@ ggplot(top_pathways, aes(x = NES, y = reorder(Description, NES))) +
   theme_classic()
 
 ```
+
+SUPPLEMENTARY TABLE 2 (4 quadrants + total)
+```{r}
+library(dplyr)
+library(gtsummary)
+
+# Load data
+immcohort <- read.csv("immcohort_sourcespecific_pm25.csv")
+
+# Variables included in Table 1
+table_vars <- c(
+  "Age",
+  "Sex",
+  "Race",
+  "Smoking",
+  "early_vs_late_stage",
+  "histology",
+  "PD_L1_expression",
+  "Traffic_mean_pre5yr",
+  "notraffic_pre5yr"
+)
+
+continuous_vars <- c(
+  "Age",
+  "Traffic_mean_pre5yr",
+  "notraffic_pre5yr"
+)
+
+categorical_vars <- setdiff(
+  table_vars,
+  c(
+    continuous_vars,
+    "early_vs_late_stage",
+    "PD_L1_expression"
+  )
+)
+
+# Specify quadrant order
+quadrant_levels <- c(
+  "LowT_LowNT",
+  "HighT_LowNT",
+  "LowT_HighNT",
+  "HighT_HighNT"
+)
+
+# Create patient-level analytical cohort
+quadrant_data <- immcohort %>%
+  filter(
+    Sample_Type == "BAL",
+    quadrant %in% quadrant_levels
+  ) %>%
+  distinct(Subject_ID1, .keep_all = TRUE) %>%
+  mutate(
+    # Set the order of the four quadrants
+    quadrant = factor(
+      quadrant,
+      levels = quadrant_levels
+    ),
+
+    # Relabel stage categories
+    early_vs_late_stage = factor(
+      recode(
+        trimws(as.character(early_vs_late_stage)),
+        "early" = "<=IIIa",
+        "late"  = ">=IIIb"
+      ),
+      levels = c("<=IIIa", ">=IIIb")
+    ),
+
+    # Combine PD-L1 "Low" and "Negative"
+    PD_L1_expression = factor(
+      recode(
+        trimws(as.character(PD_L1_expression)),
+        "Low" = "Negative"
+      ),
+      levels = c("Negative", "High")
+    ),
+
+    # Ensure continuous variables are numeric
+    across(
+      all_of(continuous_vars),
+      ~ as.numeric(as.character(.x))
+    ),
+
+    # Ensure remaining categorical variables are factors
+    across(
+      all_of(categorical_vars),
+      ~ factor(.x)
+    )
+  )
+
+# Confirm the number of patients in each quadrant
+table(
+  quadrant_data$quadrant,
+  useNA = "ifany"
+)
+
+# Confirm that the quadrant totals equal the analytical sample size
+sum(table(quadrant_data$quadrant))
+nrow(quadrant_data)
+
+# Confirm the recoded categories
+table(
+  quadrant_data$early_vs_late_stage,
+  useNA = "ifany"
+)
+
+table(
+  quadrant_data$PD_L1_expression,
+  useNA = "ifany"
+)
+
+# Create Table 1 with four quadrant columns and a total column
+table1_all_quadrants <- quadrant_data %>%
+  select(all_of(table_vars), quadrant) %>%
+  tbl_summary(
+    by = quadrant,
+
+    # Display both levels of stage and PD-L1
+    type = list(
+      c(
+        early_vs_late_stage,
+        PD_L1_expression
+      ) ~ "categorical"
+    ),
+
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+
+    digits = list(
+      all_continuous() ~ 1,
+      all_categorical() ~ c(0, 1)
+    ),
+
+    missing = "ifany",
+
+    label = list(
+      Age ~ "Age, years",
+      early_vs_late_stage ~ "Stage",
+      PD_L1_expression ~ "PD-L1 expression",
+      Traffic_mean_pre5yr ~ "Traffic PM2.5, 5-year mean",
+      notraffic_pre5yr ~ "Non-traffic PM2.5, 5-year mean"
+    )
+  ) %>%
+  modify_header(
+    label = "**Characteristic**",
+    all_stat_cols() ~ "**{level}**, N = {n}"
+  ) %>%
+  add_overall(
+    last = TRUE,
+    col_label = "**Total, N = {N}**"
+  )
+
+# Display table
+table1_all_quadrants
+```
